@@ -98,6 +98,10 @@ func PublishJSON(topic string, data any) {
 	}
 }
 
+func SubscribeRelative(topic string, onMessage OnMessageListener) {
+	Subscribe(cfg.Topic+"/"+topic, onMessage)
+}
+
 func Subscribe(topic string, onMessage OnMessageListener) {
 	client.Subscribe(
 		topic,
