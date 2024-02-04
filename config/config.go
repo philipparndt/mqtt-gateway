@@ -10,8 +10,8 @@ type MQTTConfig struct {
 	Retain   bool   `json:"retain"`
 	Topic    string `json:"topic"`
 	QoS      byte   `json:"qos"`
-	Username int    `json:"username,omitempty"`
-	Password int    `json:"password,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 func ReplaceEnvVariables(input []byte) []byte {
