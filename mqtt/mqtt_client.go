@@ -103,6 +103,7 @@ func SubscribeRelative(topic string, onMessage OnMessageListener) {
 }
 
 func Subscribe(topic string, onMessage OnMessageListener) {
+	logger.Debug("Subscribing to topic", topic)
 	client.Subscribe(
 		topic,
 		cfg.QoS,
