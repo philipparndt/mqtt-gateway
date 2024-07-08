@@ -41,7 +41,7 @@ func generateRandomClientID(length int) string {
 func LogMessagesPublished() {
 	for {
 		time.Sleep(time.Hour)
-		logger.Info(fmt.Sprintf("Messages published (last hour): %d", messagesPublishedCtr))
+		logger.Debug(fmt.Sprintf("Messages published (last hour): %d", messagesPublishedCtr))
 		messagesPublishedCtr = 0
 	}
 }
