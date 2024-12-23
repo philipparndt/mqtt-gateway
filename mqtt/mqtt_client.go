@@ -82,7 +82,7 @@ func PublishAbsolute(topic string, message string, retained bool) {
 	token.Wait()
 
 	messagesPublishedCtr++
-	logger.Debug("Published message", topic, message)
+	logger.Trace("Published message", topic, message)
 
 	if token.Error() != nil {
 		logger.Error("Error publishing message", token.Error())
@@ -96,6 +96,10 @@ func PublishJSON(topic string, data any) {
 	} else {
 		PublishAbsolute(cfg.Topic+"/"+topic, string(jsonData), cfg.Retain)
 	}
+}
+
+func PublishRelative(topic string, message string, retained bool) {
+	PublishAbsolute(cfg.Topic+"/"+topic, message, cfg.Retain)
 }
 
 func SubscribeRelative(topic string, onMessage OnMessageListener) {
