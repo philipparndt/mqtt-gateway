@@ -2,7 +2,6 @@ package mqtt
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/philipparndt/go-logger"
 	"github.com/philipparndt/mqtt-gateway/config"
 	"math/rand"
@@ -41,7 +40,7 @@ func generateRandomClientID(length int) string {
 func LogMessagesPublished() {
 	for {
 		time.Sleep(time.Hour)
-		logger.Debug(fmt.Sprintf("Messages published (last hour): %d", messagesPublishedCtr))
+		logger.Info("Messages published (last hour)", "count", messagesPublishedCtr)
 		messagesPublishedCtr = 0
 	}
 }
@@ -50,7 +49,7 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	cfg = config
 	statusTopic := cfg.Topic + "/bridge/state"
 	clientID := clientIdPrefix + "_" + generateRandomClientID(10)
-	logger.Debug("Generated client ID:", clientID)
+	logger.Debug("Generated client ID", "clientID", clientID)
 
 	opts := PAHO.NewClientOptions().
 		AddBroker(config.URL).
@@ -62,14 +61,14 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 
 	client = PAHO.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		logger.Error("Error connecting to MQTT broker:", token.Error())
+		logger.Error("Error connecting to MQTT broker", "error", token.Error())
 		os.Exit(1)
 	}
 	defer client.Disconnect(250)
 
 	PublishAbsolute(statusTopic, "online", cfg.Retain)
 
-	logger.Info("Connected to MQTT broker", config.URL)
+	logger.Info("Connected to MQTT broker", "url", config.URL)
 	connectionWg.Done()
 	go LogMessagesPublished()
 
@@ -82,17 +81,17 @@ func PublishAbsolute(topic string, message string, retained bool) {
 	token.Wait()
 
 	messagesPublishedCtr++
-	logger.Trace("Published message", topic, message)
+	logger.Debug("Published message", "topic", topic, "message", message)
 
 	if token.Error() != nil {
-		logger.Error("Error publishing message", token.Error())
+		logger.Error("Error publishing message", "error", token.Error())
 	}
 }
 
 func PublishJSON(topic string, data any) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		logger.Error("Error marshaling to JSON", err)
+		logger.Error("Error marshaling to JSON", "error", err)
 	} else {
 		PublishAbsolute(cfg.Topic+"/"+topic, string(jsonData), cfg.Retain)
 	}
@@ -107,7 +106,7 @@ func SubscribeRelative(topic string, onMessage OnMessageListener) {
 }
 
 func Subscribe(topic string, onMessage OnMessageListener) {
-	logger.Debug("Subscribing to topic", topic)
+	logger.Debug("Subscribing to topic", "topic", topic)
 	client.Subscribe(
 		topic,
 		cfg.QoS,
