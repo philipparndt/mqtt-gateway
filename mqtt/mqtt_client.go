@@ -15,6 +15,11 @@ import (
 
 var messagesPublishedCtr int
 
+var (
+	LogPayloadTruncate      = true
+	LogPayloadTruncateBytes = 100
+)
+
 var client PAHO.Client
 var cfg config.MQTTConfig
 
@@ -147,12 +152,27 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	select {}
 }
 
+func payloadSize(message any) (int, bool) {
+	switch v := message.(type) {
+	case []byte:
+		return len(v), true
+	case string:
+		return len(v), true
+	default:
+		return 0, false
+	}
+}
+
 func PublishAbsolute(topic string, message any, retained bool) {
 	token := client.Publish(topic, cfg.QoS, retained, message)
 	token.Wait()
 
 	messagesPublishedCtr++
-	logger.Debug("Published message", "topic", topic, "message", message)
+	if size, ok := payloadSize(message); LogPayloadTruncate && ok && size > LogPayloadTruncateBytes {
+		logger.Debug("Published message", "topic", topic, "bytes", size)
+	} else {
+		logger.Debug("Published message", "topic", topic, "message", message)
+	}
 
 	if token.Error() != nil {
 		logger.Error("Error publishing message", "error", token.Error())
