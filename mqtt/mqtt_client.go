@@ -2,14 +2,15 @@ package mqtt
 
 import (
 	"encoding/json"
-	"github.com/philipparndt/go-logger"
-	"github.com/philipparndt/mqtt-gateway/config"
+	"expvar"
 	"math/rand"
 	"os"
 	"sync"
 	"time"
 
 	PAHO "github.com/eclipse/paho.mqtt.golang"
+	"github.com/philipparndt/go-logger"
+	"github.com/philipparndt/mqtt-gateway/config"
 )
 
 var messagesPublishedCtr int
@@ -20,6 +21,16 @@ var cfg config.MQTTConfig
 var connectionWg sync.WaitGroup
 
 type OnMessageListener func(string, []byte)
+
+type subscription struct {
+	topic     string
+	callback  PAHO.MessageHandler
+}
+
+var (
+	subscriptions   []subscription
+	subscriptionsMu sync.Mutex
+)
 
 func Start(config config.MQTTConfig, clientIdPrefix string) {
 	connectionWg.Add(1)
@@ -45,11 +56,52 @@ func LogMessagesPublished() {
 	}
 }
 
+var (
+	mqttConnectedAt   time.Time
+	mqttReconnects    int
+	mqttLastReconnect time.Time
+)
+
+func init() {
+	expvar.Publish("mqtt", expvar.Func(func() any {
+		subscriptionsMu.Lock()
+		topics := make([]string, len(subscriptions))
+		for i, s := range subscriptions {
+			topics[i] = s.topic
+		}
+		subscriptionsMu.Unlock()
+
+		info := map[string]any{
+			"connected_at":    mqttConnectedAt.Format(time.RFC3339),
+			"reconnects":      mqttReconnects,
+			"subscriptions":   topics,
+		}
+		if !mqttLastReconnect.IsZero() {
+			info["last_reconnect"] = mqttLastReconnect.Format(time.RFC3339)
+		}
+		return info
+	}))
+}
+
+func resubscribe() {
+	subscriptionsMu.Lock()
+	subs := make([]subscription, len(subscriptions))
+	copy(subs, subscriptions)
+	subscriptionsMu.Unlock()
+
+	for _, s := range subs {
+		logger.Info("Re-subscribing to topic", "topic", s.topic)
+		client.Subscribe(s.topic, cfg.QoS, s.callback)
+	}
+}
+
 func connect(config config.MQTTConfig, clientIdPrefix string) {
 	cfg = config
 	statusTopic := cfg.Topic + "/bridge/state"
 	clientID := clientIdPrefix + "_" + generateRandomClientID(10)
 	logger.Debug("Generated client ID", "clientID", clientID)
+
+	firstConnect := true
 
 	opts := PAHO.NewClientOptions().
 		AddBroker(config.URL).
@@ -58,6 +110,25 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 
 	opts.Password = config.Password
 	opts.Username = config.Username
+
+	opts.SetOnConnectHandler(func(_ PAHO.Client) {
+		if firstConnect {
+			firstConnect = false
+			mqttConnectedAt = time.Now()
+			return
+		}
+
+		mqttReconnects++
+		mqttLastReconnect = time.Now()
+		logger.Info("Reconnected to MQTT broker, re-subscribing", "reconnects", mqttReconnects)
+
+		PublishAbsolute(statusTopic, "online", cfg.Retain)
+		resubscribe()
+	})
+
+	opts.SetConnectionLostHandler(func(_ PAHO.Client, err error) {
+		logger.Error("MQTT connection lost", "error", err)
+	})
 
 	client = PAHO.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
@@ -107,11 +178,13 @@ func SubscribeRelative(topic string, onMessage OnMessageListener) {
 
 func Subscribe(topic string, onMessage OnMessageListener) {
 	logger.Debug("Subscribing to topic", "topic", topic)
-	client.Subscribe(
-		topic,
-		cfg.QoS,
-		func(_ PAHO.Client, message PAHO.Message) {
-			onMessage(message.Topic(), message.Payload())
-		},
-	)
+	callback := func(_ PAHO.Client, message PAHO.Message) {
+		onMessage(message.Topic(), message.Payload())
+	}
+
+	subscriptionsMu.Lock()
+	subscriptions = append(subscriptions, subscription{topic: topic, callback: callback})
+	subscriptionsMu.Unlock()
+
+	client.Subscribe(topic, cfg.QoS, callback)
 }
