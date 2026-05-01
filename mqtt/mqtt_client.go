@@ -147,7 +147,7 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	select {}
 }
 
-func PublishAbsolute(topic string, message string, retained bool) {
+func PublishAbsolute(topic string, message any, retained bool) {
 	token := client.Publish(topic, cfg.QoS, retained, message)
 	token.Wait()
 
@@ -164,11 +164,11 @@ func PublishJSON(topic string, data any) {
 	if err != nil {
 		logger.Error("Error marshaling to JSON", "error", err)
 	} else {
-		PublishAbsolute(cfg.Topic+"/"+topic, string(jsonData), cfg.Retain)
+		PublishAbsolute(cfg.Topic+"/"+topic, jsonData, cfg.Retain)
 	}
 }
 
-func PublishRelative(topic string, message string, retained bool) {
+func PublishRelative(topic string, message any, retained bool) {
 	PublishAbsolute(cfg.Topic+"/"+topic, message, cfg.Retain)
 }
 
