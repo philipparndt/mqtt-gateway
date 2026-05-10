@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	PAHO "github.com/eclipse/paho.mqtt.golang"
 	"github.com/philipparndt/go-logger"
@@ -152,6 +153,13 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	select {}
 }
 
+func logMessage(message any) any {
+	if b, ok := message.([]byte); ok && utf8.Valid(b) {
+		return string(b)
+	}
+	return message
+}
+
 func payloadSize(message any) (int, bool) {
 	switch v := message.(type) {
 	case []byte:
@@ -171,7 +179,7 @@ func PublishAbsolute(topic string, message any, retained bool) {
 	if size, ok := payloadSize(message); LogPayloadTruncate && ok && size > LogPayloadTruncateBytes {
 		logger.Debug("Published message", "topic", topic, "bytes", size)
 	} else {
-		logger.Debug("Published message", "topic", topic, "message", message)
+		logger.Debug("Published message", "topic", topic, "message", logMessage(message))
 	}
 
 	if token.Error() != nil {
