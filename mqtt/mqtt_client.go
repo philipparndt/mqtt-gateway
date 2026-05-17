@@ -19,6 +19,13 @@ var messagesPublishedCtr int
 var (
 	LogPayloadTruncate      = true
 	LogPayloadTruncateBytes = 100
+
+	// LogMessagesPublishedLogger is the logger function used for the hourly
+	// "Messages published (last hour)" summary line. Defaults to logger.Debug
+	// so the noise stays out of normal `info`-level operation; callers that
+	// want it visible can set it to logger.Info, logger.Warn, etc. before
+	// calling Start.
+	LogMessagesPublishedLogger = logger.Debug
 )
 
 var client PAHO.Client
@@ -57,7 +64,7 @@ func generateRandomClientID(length int) string {
 func LogMessagesPublished() {
 	for {
 		time.Sleep(time.Hour)
-		logger.Info("Messages published (last hour)", "count", messagesPublishedCtr)
+		LogMessagesPublishedLogger("Messages published (last hour)", "count", messagesPublishedCtr)
 		messagesPublishedCtr = 0
 	}
 }
