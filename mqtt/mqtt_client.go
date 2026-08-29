@@ -51,6 +51,32 @@ func Start(config config.MQTTConfig, clientIdPrefix string) {
 	connectionWg.Wait()
 }
 
+// Stop ends the MQTT session cleanly, waiting up to 250 ms for in-flight work.
+// Safe to call when never started or already disconnected.
+//
+// This matters for the retained status topic. The client registers "offline" as
+// its will, and the broker delivers a will when a connection drops
+// *unexpectedly*. A clean DISCONNECT discards it instead — which is exactly what
+// a planned shutdown wants: a process that is being replaced must not announce
+// its own death, because its successor has usually already published "online"
+// and the late "offline" would overwrite it.
+//
+// Until now that was not possible. connect() blocks in select{} forever, so the
+// deferred Disconnect it held could never run, and every exit tore the TCP
+// connection down instead of ending the session — firing the will each time.
+// Under a rolling deployment that leaves the status topic reading "offline"
+// while the service is up.
+//
+// Callers should invoke Stop from their signal handler before main returns.
+func Stop() {
+	if client == nil || !client.IsConnected() {
+		return
+	}
+
+	logger.Info("Disconnecting from MQTT broker")
+	client.Disconnect(250)
+}
+
 func generateRandomClientID(length int) string {
 	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -148,7 +174,8 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 		logger.Error("Error connecting to MQTT broker", "error", token.Error())
 		os.Exit(1)
 	}
-	defer client.Disconnect(250)
+	// No deferred Disconnect here: this function never returns (see select{}
+	// below), so the defer was unreachable. Shutting down is Stop's job.
 
 	PublishAbsolute(statusTopic, "online", cfg.Retain)
 
