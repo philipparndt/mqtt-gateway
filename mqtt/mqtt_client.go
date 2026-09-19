@@ -28,6 +28,11 @@ var (
 	LogMessagesPublishedLogger = logger.Debug
 )
 
+const (
+	statusOnline  = "online"
+	statusOffline = "offline"
+)
+
 var client PAHO.Client
 var cfg config.MQTTConfig
 
@@ -134,6 +139,33 @@ func resubscribe() {
 	}
 }
 
+// isStaleOffline reports whether a payload seen on our own status topic
+// contradicts the fact that we are connected and have to say so again.
+func isStaleOffline(payload []byte) bool {
+	return string(payload) == statusOffline
+}
+
+// guardStatus keeps `<topic>/bridge/state` truthful. The will is the only
+// thing that ever writes "offline", and it belongs to a *connection*, not to
+// the service: during a rolling update the new pod announces "online" and then
+// the old pod dies and its retained will lands on top, leaving a running
+// service marked offline until its next restart. Watching our own status topic
+// and re-asserting "online" fixes that ordering whichever way it happens, and
+// costs nothing while the state is correct.
+func guardStatus(statusTopic string) {
+	client.Subscribe(statusTopic, 1, func(_ PAHO.Client, message PAHO.Message) {
+		if !isStaleOffline(message.Payload()) {
+			return
+		}
+		// Off the callback goroutine: waiting for a publish token inside a
+		// paho message handler blocks the ack it is waiting for.
+		go func() {
+			logger.Info("Status topic says offline while we are connected, correcting", "topic", statusTopic)
+			PublishAbsolute(statusTopic, statusOnline, true)
+		}()
+	})
+}
+
 func connect(config config.MQTTConfig, clientIdPrefix string) {
 	cfg = config
 	statusTopic := cfg.Topic + "/bridge/state"
@@ -145,7 +177,7 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	opts := PAHO.NewClientOptions().
 		AddBroker(config.URL).
 		SetClientID(clientID).
-		SetWill(statusTopic, "offline", 1, true)
+		SetWill(statusTopic, statusOffline, 1, true)
 
 	opts.Password = config.Password
 	opts.Username = config.Username
@@ -161,7 +193,8 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 		mqttLastReconnect = time.Now()
 		logger.Info("Reconnected to MQTT broker, re-subscribing", "reconnects", mqttReconnects)
 
-		PublishAbsolute(statusTopic, "online", cfg.Retain)
+		PublishAbsolute(statusTopic, statusOnline, true)
+		guardStatus(statusTopic)
 		resubscribe()
 	})
 
@@ -177,7 +210,10 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	// No deferred Disconnect here: this function never returns (see select{}
 	// below), so the defer was unreachable. Shutting down is Stop's job.
 
-	PublishAbsolute(statusTopic, "online", cfg.Retain)
+	// Always retained, whatever cfg.Retain says: the will is retained, so a
+	// non-retained "online" left every late subscriber reading "offline".
+	PublishAbsolute(statusTopic, statusOnline, true)
+	guardStatus(statusTopic)
 
 	logger.Info("Connected to MQTT broker", "url", config.URL)
 	connectionWg.Done()
