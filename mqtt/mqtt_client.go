@@ -1,11 +1,13 @@
 package mqtt
 
 import (
+	"context"
 	"encoding/json"
 	"expvar"
 	"math/rand"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -26,6 +28,25 @@ var (
 	// want it visible can set it to logger.Info, logger.Warn, etc. before
 	// calling Start.
 	LogMessagesPublishedLogger = logger.Debug
+
+	// RetryInterval is the delay between connection attempts while
+	// StartContext waits for the broker.
+	RetryInterval = 5 * time.Second
+
+	// MaxReconnectInterval caps the backoff between reconnect attempts after
+	// a lost connection. Zero keeps paho's default (10 minutes). Set it
+	// before calling Start or StartContext.
+	MaxReconnectInterval time.Duration
+
+	// DropWhenDisconnected makes the publish functions drop (and debug-log)
+	// messages while the broker is not connected, instead of handing them to
+	// paho, where the caller waits until the connection is back. Use
+	// SetOnReconnect to republish state that was dropped during an outage.
+	DropWhenDisconnected = false
+
+	// PublishTimeout bounds how long a publish waits for its completion.
+	// Zero waits without limit.
+	PublishTimeout time.Duration
 )
 
 const (
@@ -36,7 +57,19 @@ const (
 var client PAHO.Client
 var cfg config.MQTTConfig
 
-var connectionWg sync.WaitGroup
+var (
+	onReconnect   func()
+	onReconnectMu sync.Mutex
+)
+
+// SetOnReconnect registers a callback that runs every time the connection is
+// re-established after it was lost, once the status topic and subscriptions
+// are restored. It does not run for the first connection.
+func SetOnReconnect(f func()) {
+	onReconnectMu.Lock()
+	defer onReconnectMu.Unlock()
+	onReconnect = f
+}
 
 type OnMessageListener func(string, []byte)
 
@@ -50,10 +83,43 @@ var (
 	subscriptionsMu sync.Mutex
 )
 
+// Start connects to the broker and returns once connected. It exits the
+// process when the first connection attempt fails; use StartContext to wait
+// for the broker instead.
 func Start(config config.MQTTConfig, clientIdPrefix string) {
-	connectionWg.Add(1)
-	go connect(config, clientIdPrefix)
-	connectionWg.Wait()
+	newClient(config, clientIdPrefix)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		logger.Error("Error connecting to MQTT broker", "error", token.Error())
+		os.Exit(1)
+	}
+	connected()
+}
+
+// StartContext connects to the broker and returns once connected. Unlike
+// Start it retries every RetryInterval while the broker is not reachable. It
+// returns ctx.Err() when ctx is cancelled before a connection could be made.
+func StartContext(ctx context.Context, config config.MQTTConfig, clientIdPrefix string) error {
+	newClient(config, clientIdPrefix)
+	for {
+		token := client.Connect()
+		select {
+		case <-token.Done():
+		case <-ctx.Done():
+			client.Disconnect(0)
+			return ctx.Err()
+		}
+		if token.Error() == nil {
+			connected()
+			return nil
+		}
+		logger.Error("MQTT broker not available, retrying",
+			"url", config.URL, "error", token.Error(), "retryIn", RetryInterval)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(RetryInterval):
+		}
+	}
 }
 
 // Stop ends the MQTT session cleanly, waiting up to 250 ms for in-flight work.
@@ -101,6 +167,7 @@ func LogMessagesPublished() {
 }
 
 var (
+	statsMu           sync.Mutex
 	mqttConnectedAt   time.Time
 	mqttReconnects    int
 	mqttLastReconnect time.Time
@@ -115,6 +182,8 @@ func init() {
 		}
 		subscriptionsMu.Unlock()
 
+		statsMu.Lock()
+		defer statsMu.Unlock()
 		info := map[string]any{
 			"connected_at":    mqttConnectedAt.Format(time.RFC3339),
 			"reconnects":      mqttReconnects,
@@ -166,13 +235,14 @@ func guardStatus(statusTopic string) {
 	})
 }
 
-func connect(config config.MQTTConfig, clientIdPrefix string) {
+// newClient builds the paho client for config and stores it in client.
+func newClient(config config.MQTTConfig, clientIdPrefix string) {
 	cfg = config
 	statusTopic := cfg.Topic + "/bridge/state"
 	clientID := clientIdPrefix + "_" + generateRandomClientID(10)
 	logger.Debug("Generated client ID", "clientID", clientID)
 
-	firstConnect := true
+	var reconnect atomic.Bool
 
 	opts := PAHO.NewClientOptions().
 		AddBroker(config.URL).
@@ -181,21 +251,35 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 
 	opts.Password = config.Password
 	opts.Username = config.Username
+	if MaxReconnectInterval > 0 {
+		opts.SetMaxReconnectInterval(MaxReconnectInterval)
+	}
 
 	opts.SetOnConnectHandler(func(_ PAHO.Client) {
-		if firstConnect {
-			firstConnect = false
+		if !reconnect.Swap(true) {
+			statsMu.Lock()
 			mqttConnectedAt = time.Now()
+			statsMu.Unlock()
 			return
 		}
 
+		statsMu.Lock()
 		mqttReconnects++
 		mqttLastReconnect = time.Now()
-		logger.Info("Reconnected to MQTT broker, re-subscribing", "reconnects", mqttReconnects)
+		reconnects := mqttReconnects
+		statsMu.Unlock()
+		logger.Info("Reconnected to MQTT broker, re-subscribing", "reconnects", reconnects)
 
 		PublishAbsolute(statusTopic, statusOnline, true)
 		guardStatus(statusTopic)
 		resubscribe()
+
+		onReconnectMu.Lock()
+		cb := onReconnect
+		onReconnectMu.Unlock()
+		if cb != nil {
+			cb()
+		}
 	})
 
 	opts.SetConnectionLostHandler(func(_ PAHO.Client, err error) {
@@ -203,24 +287,23 @@ func connect(config config.MQTTConfig, clientIdPrefix string) {
 	})
 
 	client = PAHO.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		logger.Error("Error connecting to MQTT broker", "error", token.Error())
-		os.Exit(1)
-	}
-	// No deferred Disconnect here: this function never returns (see select{}
-	// below), so the defer was unreachable. Shutting down is Stop's job.
+}
+
+// startOnce guards the work that must happen only for the first successful
+// start of the process.
+var startOnce sync.Once
+
+// connected announces the service after the first successful connection.
+func connected() {
+	statusTopic := cfg.Topic + "/bridge/state"
 
 	// Always retained, whatever cfg.Retain says: the will is retained, so a
 	// non-retained "online" left every late subscriber reading "offline".
 	PublishAbsolute(statusTopic, statusOnline, true)
 	guardStatus(statusTopic)
 
-	logger.Info("Connected to MQTT broker", "url", config.URL)
-	connectionWg.Done()
-	go LogMessagesPublished()
-
-	// Keep the connection active until the application is terminated
-	select {}
+	logger.Info("Connected to MQTT broker", "url", cfg.URL)
+	startOnce.Do(func() { go LogMessagesPublished() })
 }
 
 func logMessage(message any) any {
@@ -242,8 +325,20 @@ func payloadSize(message any) (int, bool) {
 }
 
 func PublishAbsolute(topic string, message any, retained bool) {
+	if DropWhenDisconnected && (client == nil || !client.IsConnectionOpen()) {
+		logger.Debug("MQTT not connected, dropping message", "topic", topic)
+		return
+	}
+
 	token := client.Publish(topic, cfg.QoS, retained, message)
-	token.Wait()
+	if PublishTimeout > 0 {
+		if !token.WaitTimeout(PublishTimeout) {
+			logger.Error("Timeout publishing message", "topic", topic)
+			return
+		}
+	} else {
+		token.Wait()
+	}
 
 	messagesPublishedCtr++
 	if size, ok := payloadSize(message); LogPayloadTruncate && ok && size > LogPayloadTruncateBytes {
